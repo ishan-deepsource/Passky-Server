@@ -51,15 +51,16 @@ class Database{
     }
 
     public static function getUserIpAddress() : string {
-        if(!empty($_SERVER['HTTP_CLIENT_IP'])) return $_SERVER['HTTP_CLIENT_IP'];
-        if(!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) return $_SERVER['HTTP_X_FORWARDED_FOR'];
-        return $_SERVER['REMOTE_ADDR'];
+        if(!empty($_SERVER['HTTP_CLIENT_IP'])) return hash("sha256", $_SERVER['HTTP_CLIENT_IP'] . "passky2020");
+        if(!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) return hash("sha256", $_SERVER['HTTP_X_FORWARDED_FOR'] . "passky2020");
+        return hash("sha256", $_SERVER['REMOTE_ADDR'] . "passky2020");
     }
 
     public static function userSentToManyRequests(string $action) : bool{
-        $timer = 0;
 
         $timerOptions = [
+            'getInfo' => Settings::getLimiterGetInfo(),
+            'getToken' => Settings::getLimiterGetToken(),
             'createAccount' => Settings::getLimiterCreateAccount(),
             'getPasswords' => Settings::getLimiterGetPasswords(),
             'savePassword' => Settings::getLimiterSavePassword(),
@@ -75,14 +76,16 @@ class Database{
         ];
 
         $timer = $timerOptions[$action];
+        if($timer < 1) return false;
 
         $ips_array = json_decode(file_get_contents('../api-limiter.json'), true);
 
-		if(!empty($ips_array[$action][self::getUserIpAddress()])){
-			if((time() - $ips_array[$action][self::getUserIpAddress()]) < $timer) return true;
+        $ip = self::getUserIpAddress();
+		if(!empty($ips_array[$action][$ip])){
+			if((time() - $ips_array[$action][$ip]) < $timer) return true;
 		}
 
-		$ips_array[$action][self::getUserIpAddress()] = time();
+		$ips_array[$action][$ip] = time();
 		file_put_contents('../api-limiter.json', json_encode($ips_array));
         return false;
     }
@@ -103,27 +106,29 @@ class Database{
         if($otp == null) return 0;
 
         if(strlen($otp) == 6){
-
             if($secret == null) return 0;
             $google2fa = new Google2FA();
             return $google2fa->verifyKey($secret, $otp);
-
         }else if(strlen($otp) == 44){
             if($otps == null) return 0;
             if(!str_contains($otps, substr($otp, 0, 12))) return 0;
-
             return self::isYubiOTPValid($otp);
-        }else{
-            $otp_array = json_decode(file_get_contents('../otp.json'), true);
-
-            if(!empty($otp_array[$username])){
-                if($otp_array[$username] == $otp) return 1;
-            }
         }
         return 0;
     }
 
-    public static function getUserCount(){
+    public static function isTokenValid(string $username, string $token) : int{
+        if($token == null || strlen($token) != 64) return 0;
+
+        $token_array = json_decode(file_get_contents('../tokens.json'), true);
+        $userID = $username . "-" . self::getUserIpAddress();
+        if(!empty($token_array[$userID])){
+            if($token_array[$userID] == $token) return 1;
+        }
+        return 0;
+    }
+
+    public static function getUserCount() : int{
         try{
             $conn = new PDO("mysql:host=" . Settings::getDBHost() . ";dbname=passky", Settings::getDBUsername(), Settings::getDBPassword());
             $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -131,14 +136,14 @@ class Database{
             $stmt = $conn->prepare("SELECT COUNT(*) AS 'amount' FROM users");
             $stmt->execute();
 
-            return ($stmt->rowCount() == 1) ? $stmt->fetch()['amount'] : null;
+            return ($stmt->rowCount() == 1) ? $stmt->fetch()['amount'] : -1;
         }catch(PDOException $e) {
-            return null;
+            return -1;
         }
         $conn = null;
     }
 
-    public static function getPasswordCount($user_id){
+    public static function getPasswordCount($user_id) : int{
         try{
             $conn = new PDO("mysql:host=" . Settings::getDBHost() . ";dbname=passky", Settings::getDBUsername(), Settings::getDBPassword());
             $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -147,17 +152,27 @@ class Database{
             $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
             $stmt->execute();
 
-            return ($stmt->rowCount() == 1) ? $stmt->fetch()['amount'] : null;
+            return ($stmt->rowCount() == 1) ? $stmt->fetch()['amount'] : -1;
         }catch(PDOException $e) {
-            return null;
+            return -1;
         }
         $conn = null;
     }
 
-    public static function createAccount(string $username, string $email, string $password) : string{
+    public static function getInfo() : string{
+        $JSON_OBJ = new StdClass;
+        $JSON_OBJ->version = "v5.0.0";
+        $JSON_OBJ->users = self::getUserCount();
+        $JSON_OBJ->maxUsers = Settings::getMaxAccounts();
+        $JSON_OBJ->maxPasswords = Settings::getMaxPasswords();
+        $JSON_OBJ->location = Settings::getLocation();
+        return Display::json(0, $JSON_OBJ);
+    }
+
+    public static function createAccount(string $username, string $password, string $email) : string{
 
         $amount_of_accounts = self::getUserCount();
-        if($amount_of_accounts == null) return Display::json(505);
+        if($amount_of_accounts == -1) return Display::json(505);
         if($amount_of_accounts >= Settings::getMaxAccounts()) return Display::json(15);
 
         $sub_email = filter_var($email, FILTER_SANITIZE_EMAIL);
@@ -196,8 +211,8 @@ class Database{
         $conn = null;
     }
 
-    public static function deleteAccount(string $username, string $password, string $otp) : string{
-        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+    public static function getToken(string $username, string $password, string $otp) : string{
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(12);
         if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
 
         $user = new User;
@@ -213,13 +228,82 @@ class Database{
         }
 
         if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
+     
         if(!password_verify($password, $user->password)) return Display::json(2);
 
-        $passwords_obj = json_decode(self::getPasswords($user->username, $password, $otp), true);
+        $token_array = json_decode(file_get_contents('../tokens.json'), true);
+        $userID = $username . "-" . self::getUserIpAddress();
+        if(empty($token_array[$userID])){
+            $token = hash("sha256", self::generateCodes());
+            $token_array[$userID] = $token;
+            file_put_contents('../tokens.json', json_encode($token_array));
+        }else{
+            $token = $token_array[$userID];
+        }
+
+        $username = strtolower($username);
+
+        $today = date('Y-m-d');
+        if($user->accessed != $today){
+            try{
+                $conn = new PDO("mysql:host=" . Settings::getDBHost() . ";dbname=passky", Settings::getDBUsername(), Settings::getDBPassword());
+                $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    
+                $stmt = $conn->prepare("UPDATE users SET accessed = :accessed WHERE username = :username");
+                $stmt->bindParam(':username', $username, PDO::PARAM_STR);
+                $stmt->bindParam(':accessed', $today, PDO::PARAM_STR);
+                $stmt->execute();
+            }catch(PDOException $e) {}
+            $conn = null;
+        }
+
+        try{
+
+        	$conn = new PDO("mysql:host=" . Settings::getDBHost() . ";dbname=passky", Settings::getDBUsername(), Settings::getDBPassword());
+        	$conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        	$stmt = $conn->prepare("SELECT p.password_id AS id, p.website, p.username, p.password, p.message FROM passwords p JOIN user_passwords up ON up.password_id = p.password_id JOIN users u ON u.user_id = up.user_id WHERE u.username = :username");
+        	$stmt->bindParam(':username', $username, PDO::PARAM_STR);
+        	$stmt->execute();
+
+            $JSON_OBJ = new StdClass;
+            $JSON_OBJ->token = $token;
+            $JSON_OBJ->auth = ($user->secret != null);
+            $JSON_OBJ->yubico = $user->yubico_otp;
+
+        	if($stmt->rowCount() > 0){
+                $JSON_OBJ->passwords = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                return Display::json(0, $JSON_OBJ);
+        	}
+
+            return Display::json(8, $JSON_OBJ);
+
+        }catch(PDOException $e) {
+            return Display::json(505);
+        }
+        $conn = null;
+    }
+
+    public static function deleteAccount(string $username, string $token) : string{
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
+
+        $user = new User;
+        $user->fromUsername($username);
+
+        switch($user->response){
+            case 1:
+                return Display::json(1);
+            break;
+            case 505:
+                return Display::json(505);
+            break;
+        }
+
+        $passwords_obj = json_decode(self::getPasswords($user->username, $token), true);
         if($passwords_obj["error"] == 0){
             foreach($passwords_obj["passwords"] as &$password_data){
-                self::deletePassword($user->username, $password, $password_data['id'], $otp);
+                self::deletePassword($user->username, $token, $password_data['id']);
             }
         }
 
@@ -258,10 +342,10 @@ class Database{
       $conn = null;
     }
 
-    public static function savePassword(string $username, string $password, string $website, string $username2, string $password2, string $message, string $otp) : string{
+    public static function savePassword(string $username, string $token, string $website, string $username2, string $password2, string $message) : string{
 
         if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         if(!(strlen($password2) >= 5 && strlen($password2) <= 255)) return Display::json(5);
         if(!(strlen($username2) >= 3 && strlen($username2) <= 255)) return Display::json(1);
@@ -280,14 +364,10 @@ class Database{
             break;
         }
 
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
-
         $website = strtolower($website);
 
         $password_count = self::getPasswordCount($user->user_id);
-        if($password_count == null) return Display::json(505);
+        if($password_count == -1) return Display::json(505);
         if($password_count >= Settings::getMaxPasswords()) return Display::json(16);
 
         try{
@@ -319,10 +399,10 @@ class Database{
         $conn = null;
     }
 
-    public static function importPasswords(string $username, string $password, string $json_passwords) : string{
+    public static function importPasswords(string $username, string $token, string $json_passwords) : string{
 
         if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         $password_obj = json_decode($json_passwords, true);
         if($password_obj === null && json_last_error() !== JSON_ERROR_NONE) return Display::json(14);
@@ -339,10 +419,8 @@ class Database{
             break;
         }
 
-        if(!password_verify($password, $user->password)) return Display::json(2);
-
         $password_count = self::getPasswordCount($user->user_id);
-        if($password_count == null) return Display::json(505);
+        if($password_count == -1) return Display::json(505);
         if($password_count + count($password_obj) >= Settings::getMaxPasswords()) return Display::json(16);
 
         $num_success = 0;
@@ -391,9 +469,9 @@ class Database{
         return Display::json(0, $JSON_OBJ);
     }
 
-    public static function editPassword(string $username, string $password, int $password_id, string $website, string $username2, string $password2, string $message, string $otp) : string{
+    public static function editPassword(string $username, string $token, int $password_id, string $website, string $username2, string $password2, string $message) : string{
         if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         if(!(strlen($password2) >= 5 && strlen($password2) <= 255)) return Display::json(5);
         if(!(strlen($username2) >= 3 && strlen($username2) <= 255)) return Display::json(1);
@@ -411,10 +489,6 @@ class Database{
                 return Display::json(505);
             break;
         }
-
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
 
         switch(self::isPasswordOwnedByUser($username, $password_id)){
             case 2:
@@ -449,9 +523,9 @@ class Database{
 
     }
 
-    public static function deletePassword(string $username, string $password, int $password_id, string $otp) : string{
+    public static function deletePassword(string $username, string $token, int $password_id) : string{
         if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         $user = new User;
         $user->fromUsername($username);
@@ -464,11 +538,6 @@ class Database{
                 return Display::json(505);
             break;
         }
-
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
-
 
         switch(self::isPasswordOwnedByUser($username, $password_id)){
             case 2:
@@ -501,8 +570,9 @@ class Database{
         $conn = null;
     }
 
-    public static function getPasswords(string $username, string $password, string $otp) : string{
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+    public static function getPasswords(string $username, string $token) : string{
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         $user = new User;
         $user->fromUsername($username);
@@ -514,19 +584,6 @@ class Database{
             case 505:
                 return Display::json(505);
             break;
-        }
-
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-     
-        if(!password_verify($password, $user->password)) return Display::json(2);
-
-        $otp_array = json_decode(file_get_contents('../otp.json'), true);
-        if(empty($otp_array[$username])){
-            $secret = self::encryptPassword(self::generateCodes());
-            $otp_array[$username] = $secret;
-            file_put_contents('../otp.json', json_encode($otp_array));
-        }else{
-            $secret = $otp_array[$username];
         }
 
         $username = strtolower($username);
@@ -541,9 +598,6 @@ class Database{
         	$stmt->execute();
 
             $JSON_OBJ = new StdClass;
-            $JSON_OBJ->secret = $secret;
-            $JSON_OBJ->auth = ($user->secret != null);
-            $JSON_OBJ->yubico = $user->yubico_otp;
 
         	if($stmt->rowCount() > 0){
                 $JSON_OBJ->passwords = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -558,8 +612,9 @@ class Database{
         $conn = null;
     }
 
-    public static function enable2Fa(string $username, string $password, string $otp) : string{
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+    public static function enable2Fa(string $username, string $token) : string{
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         $user = new User;
         $user->fromUsername($username);
@@ -573,9 +628,7 @@ class Database{
             break;
         }
 
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
+        if($user->secret != null) return Display::json(26);
 
         $google2fa = new Google2FA();
         $secret = $google2fa->generateSecretKey();
@@ -608,8 +661,9 @@ class Database{
         $conn = null;
     }
 
-    public static function disable2Fa(string $username, string $password, string $otp) : string{
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+    public static function disable2Fa(string $username, string $token) : string{
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
 
         $user = new User;
         $user->fromUsername($username);
@@ -622,11 +676,9 @@ class Database{
                 return Display::json(505);
             break;
         }
-
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
         
+        if($user->secret == null) return Display::json(27);
+
         try{
             $username = strtolower($username);
         	$conn = new PDO("mysql:host=" . Settings::getDBHost() . ";dbname=passky", Settings::getDBUsername(), Settings::getDBPassword());
@@ -643,8 +695,9 @@ class Database{
         $conn = null;
     }
 
-    public static function addYubiKey(string $username, string $password, string $id, string $otp){
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+    public static function addYubiKey(string $username, string $token, string $id){
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
         if(strlen($id) != 44) return Display::json(23);
 
         $user = new User;
@@ -658,10 +711,6 @@ class Database{
                 return Display::json(505);
             break;
         }
-
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
 
         if(!self::isYubiOTPValid($id)) return Display::json(23);
         $id = substr($id, 0, 12);
@@ -702,8 +751,9 @@ class Database{
         $conn = null;
     }
 
-    public static function removeYubiKey(string $username, string $password, string $id, string $otp){
-        if(!preg_match("/^[a-z0-9]{128}$/i", $password)) return Display::json(5);
+    public static function removeYubiKey(string $username, string $token, string $id){
+        if(!preg_match("/^[a-z0-9.]{6,30}$/i", $username)) return Display::json(1);
+        if(!self::isTokenValid($username, $token)) return Display::json(25);
         if(strlen($id) != 44) return Display::json(23);
 
         $user = new User;
@@ -717,10 +767,6 @@ class Database{
                 return Display::json(505);
             break;
         }
-
-        if(self::is2FaValid($user->username, $otp, $user->secret, $user->yubico_otp) == 0) return Display::json(19);
-
-        if(!password_verify($password, $user->password)) return Display::json(2);
 
         if(!self::isYubiOTPValid($id)) return Display::json(23);
         $id = substr($id, 0, 12);
@@ -780,15 +826,6 @@ class Database{
                 $mail = new PHPMailer(true);
 
                 try {
-                    /*
-
-                    Uncomment this if you want to debug SMTP connection
-
-                    $mail->SMTPDebug = SMTP::DEBUG_SERVER;
-                    $mail->SMTPDebug = 2;
-                    
-                    */
-
                     $mail->isSMTP();
                     $mail->Host       = Settings::getMailHost();
                     $mail->SMTPAuth   = true;

@@ -4,6 +4,16 @@ class Settings{
 
 /*
 
+    SERVER SETTINGS
+
+*/
+
+    public static function getLocation() : string{
+        return getenv("SERVER_LOCATION", true) ?: getenv("SERVER_LOCATION") ?: "us";
+    }
+
+/*
+
     DATABASE SETTINGS
 
 */
@@ -79,6 +89,14 @@ class Settings{
     API CALL LIMITER (Brute force mitigation)
     
 */
+
+    public static function getLimiterGetInfo() : int{
+        return getenv("LIMITER_GET_INFO", true) ?: getenv("LIMITER_GET_INFO") ?: 1;
+    }
+
+    public static function getLimiterGetToken() : int{
+        return getenv("LIMITER_GET_TOKEN", true) ?: getenv("LIMITER_GET_TOKEN") ?: 3;
+    }
 
     public static function getLimiterGetPasswords() : int{
         return getenv("LIMITER_GET_PASSWORDS", true) ?: getenv("LIMITER_GET_PASSWORDS") ?: 3;

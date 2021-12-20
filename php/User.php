@@ -4,14 +4,16 @@ require_once "Settings.php";
 
 class User {
 
-    public ?int $user_id;
-    public ?string $username;
-    public ?string $email;
-    public ?string $password;
-    public ?string $secret;
-    public ?string $yubico_otp;
-    public ?string $backup_codes;
-    public int $response;
+    public ?int $user_id = null;
+    public ?string $username = null;
+    public ?string $email = null;
+    public ?string $password = null;
+    public ?string $secret = null;
+    public ?string $yubico_otp = null;
+    public ?string $backup_codes = null;
+    public ?string $created = null;
+    public ?string $accessed = null;
+    public int $response = 505;
 
     public function fromId($id){
         try{
@@ -32,6 +34,8 @@ class User {
                 $this->secret = $result['2fa_secret'];
                 $this->yubico_otp = $result['yubico_otp'];
                 $this->backup_codes = $result['backup_codes'];
+                $this->created = $result['created'];
+                $this->accessed = $result['accessed'];
                 $this->response = 0;
     		}else{
                 $this->response = 1;
@@ -64,6 +68,8 @@ class User {
                 $this->secret = $result['2fa_secret'];
                 $this->yubico_otp = $result['yubico_otp'];
                 $this->backup_codes = $result['backup_codes'];
+                $this->created = $result['created'];
+                $this->accessed = $result['accessed'];
                 $this->response = 0;
     		}else{
                 $this->response = 1;
